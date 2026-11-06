@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error::Use a release tag in the form v1.2.3.'
+            exit 1
+          fi
+
+      - name: Validate signing secrets
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.NEST_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.NEST_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERTIFICATE_BASE64" || -z "$CERTIFICATE_PASSWORD" ]]; then
+            echo '::error::Set NEST_SIGNING_CERTIFICATE_BASE64 and NEST_SIGNING_CERTIFICATE_PASSWORD.'
+            exit 1
+          fi
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal app bundle
+        run: ./scripts/build.sh --universal
+
+      - name: Set release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${RELEASE_TAG#v}" .build/Nest.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" .build/Nest.app/Contents/Info.plist
+
+      # Keep using the same self-signed identity for future releases.
+      # No Apple Developer ID or Apple notarization credentials are required.
+      - name: Import self-signed certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.NEST_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.NEST_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          certificate="$RUNNER_TEMP/nest-signing.p12"
+          keychain="$RUNNER_TEMP/nest-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 20)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain" -T /usr/bin/codesign
+          rm -f "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          # Do not use find-identity -v: a self-signed identity is not CA-trusted.
+          identity="$(security find-identity -p codesigning "$keychain" | awk '/\) [0-9A-F]{40} "nest-release"/ { print $2; exit }')"
+          if [[ -z "$identity" ]]; then
+            echo '::error::The imported .p12 must include a code-signing certificate named nest-release and its private key.'
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Sign and verify universal app
+        run: |
+          set -euo pipefail
+          for binary in .build/Nest.app/Contents/MacOS/{Nest,NestBackground}; do
+            architectures="$(lipo -archs "$binary")"
+            for architecture in arm64 x86_64; do
+              if [[ " $architectures " != *" $architecture "* ]]; then
+                echo "::error::$binary is missing $architecture (found: $architectures)."
+                exit 1
+              fi
+            done
+          done
+          codesign --force --timestamp=none --sign "$CODESIGN_IDENTITY" --identifier com.nest.local.background .build/Nest.app/Contents/MacOS/NestBackground
+          codesign --force --timestamp=none --sign "$CODESIGN_IDENTITY" .build/Nest.app
+          codesign --verify --deep --strict --all-architectures --verbose=2 .build/Nest.app
+
+      - name: Create and sign DMG
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/nest-dmg"
+          mkdir -p "$staging" dist
+          ditto .build/Nest.app "$staging/Nest.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname Nest -srcfolder "$staging" -format UDZO -ov dist/Nest.dmg
+          codesign --force --timestamp=none --sign "$CODESIGN_IDENTITY" dist/Nest.dmg
+          codesign --verify --strict --verbose=2 dist/Nest.dmg
+
+      - name: Verify app inside DMG
+        run: |
+          set -euo pipefail
+          mountpoint="$RUNNER_TEMP/nest-dmg-mounted"
+          hdiutil attach dist/Nest.dmg -nobrowse -readonly -mountpoint "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          codesign --verify --deep --strict --all-architectures --verbose=2 "$mountpoint/Nest.app"
+          for binary in "$mountpoint/Nest.app/Contents/MacOS/"{Nest,NestBackground}; do
+            architectures="$(lipo -archs "$binary")"
+            for architecture in arm64 x86_64; do
+              if [[ " $architectures " != *" $architecture "* ]]; then
+                echo "::error::$binary is missing $architecture (found: $architectures)."
+                exit 1
+              fi
+            done
+          done
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nest-universal-DMG
+          path: dist/Nest.dmg
+          if-no-files-found: error
+
+      - name: Create draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<'NOTES'
+          Universal build for Apple Silicon and Intel Macs. Requires macOS 14 or later.
+
+          Open Nest.dmg and drag Nest to Applications.
+
+          Nest is self-signed and is not notarized by Apple. On first launch, open Nest once, then go to System Settings → Privacy & Security and choose Open Anyway.
+          NOTES
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/Nest.dmg --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/Nest.dmg --verify-tag --draft --generate-notes --notes-file "$notes" --title "Nest $RELEASE_TAG"
+          fi
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/nest-signing.keychain-db"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi
+          rm -f "$RUNNER_TEMP/nest-signing.p12"

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Nest</string>
+<key>CFBundleDisplayName</key><string>Nest</string>
+<key>CFBundleIdentifier</key><string>com.nest.local</string>
+<key>CFBundleExecutable</key><string>Nest</string>
+<key>CFBundleIconFile</key><string>Nest</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>28</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSDownloadsFolderUsageDescription</key><string>Nest watches for new AirDrop files and moves them to the folders you choose.</string>
+</dict></plist>
