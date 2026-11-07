@@ -17,6 +17,14 @@ Release builds are built and signed by [GitHub Actions](.github/workflows/releas
 
 Allow Downloads access and choose a destination outside Downloads. Dump keeps its files in `~/Nest Dump`.
 
+### Support Nest
+
+Enjoying Nest? [⭐ Star us on GitHub](https://github.com/MohitMandalia/nest) and [upvote us on Product Hunt](https://www.producthunt.com/products/nest-10). Your support helps more Mac users discover Nest.
+
+<a href="https://www.producthunt.com/products/nest-10?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-nest-10" target="_blank" rel="noopener noreferrer">
+  <img alt="nest - A home for incoming files | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1307049&amp;theme=light&amp;t=1793996693052">
+</a>
+
 <details>
 <summary>Development &amp; how it works</summary>
 
